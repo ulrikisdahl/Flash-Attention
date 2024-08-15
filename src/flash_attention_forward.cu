@@ -85,7 +85,8 @@ void inner_product_matmul(
     int num_rows_per_block,
     int dimension, 
     int thread_idx, 
-    int thread_idx_limit)
+    int thread_idx_limit,
+    float scaling_factor)
 {
     if (thread_idx < thread_idx_limit){
         //each threads computes one output value
@@ -94,7 +95,7 @@ void inner_product_matmul(
         for(int k = 0; k < dimension; k++){
             temp += Q_i[local_matrix_row_index * dimension + k] * K_j[(thread_idx % num_rows_per_block) * dimension + k]; //Q_i * K^T_j
         }
-        scores[thread_idx] = temp;
+        scores[thread_idx] = scaling_factor * temp;
     }
 }
 
@@ -166,12 +167,14 @@ void forward_attention_kernel(
     int local_row_idx = threadIdx.x / dimension; 
     int col_idx = threadIdx.x % dimension; // global_col_idx == local_col_idx in this sense
 
+    //scaling factor
+    float scaling_factor = 1.0f / (sqrtf(static_cast<float>(dimension)));
+
     if(batch_idx < batch_size && local_row_idx < num_rows_per_block){ 
         for(int j = 0; j < num_blocks_per_sample; j++){
             //Load K_j, V_j to SRAM
             K_j[threadIdx.x] = key[batch_idx][j * num_rows_per_block + local_row_idx][col_idx]; // K_j
             V_j[threadIdx.x] = value[batch_idx][j * num_rows_per_block + local_row_idx][col_idx]; // V_j - Not very coalessed for when we do our matmuls later.... 
-            __syncthreads(); 
 
             for(int i = 0; i < num_blocks_per_sample; i++){ //i gives us which tile we are on for Q along the row-axis
 
@@ -181,10 +184,11 @@ void forward_attention_kernel(
                 Q_i[threadIdx.x] = query[batch_idx][global_row_idx_i][col_idx]; 
                 
                 //Compute attention scores Q_i*K^T_j
-                inner_product_matmul(Q_i, K_j, scores, num_rows_per_block, dimension, threadIdx.x, num_rows_per_block * num_rows_per_block); 
-                __syncthreads(); 
+                __syncthreads(); //necessary because utilized threads all come from the first row in the tile, but some of them operate on values from other rows in the tile
+                inner_product_matmul(Q_i, K_j, scores, num_rows_per_block, dimension, threadIdx.x, num_rows_per_block * num_rows_per_block, scaling_factor); 
+                // __syncthreads(); 
  
-                // //compute statistics - brute force it for now...
+                //compute statistics - brute force it for now...
                 kernel_reduction_max(scores, local_rowmax, num_rows_per_block, dimension, threadIdx.x, blockIdx.x);
                 __syncthreads();
 
@@ -198,13 +202,13 @@ void forward_attention_kernel(
                 kernel_compute_statistics(scores, local_rowmax, global_rowmax_old, global_rowsum_old, global_rowmax_new, global_rowsum_new, num_rows_per_block, threadIdx.x, local_row_idx, dimension); //pretty sure its good
                 __syncthreads();
             
-                // //compute attention outputs (from here on out its all element-wise so we dont need to sync threads)
+                //compute attention outputs (from here on out its all element-wise so we dont need to sync threads)
                 auto m_i_new = global_rowmax_new[local_row_idx];
                 scalar_t old_output_adjusted = (global_rowsum_old * expf(global_rowmax_old - m_i_new)) * outputs[batch_idx][global_row_idx_i][col_idx]; 
                 scalar_t local_attention_adjusted = outer_product_matmul(scores, V_j, num_rows_per_block, dimension, threadIdx.x, num_rows_per_block * dimension); //TODO: num_rows_per_block*dimension doesnt account for edge_case of non-divisible total-rows
                 local_attention_adjusted = expf(local_rowmax[local_row_idx] - m_i_new) * local_attention_adjusted; 
 
-                // //Write to global memory (HBM)
+                //Write to global memory (HBM)
                 outputs[batch_idx][global_row_idx_i][col_idx] = (1 / (global_rowsum_new[local_row_idx])) * (old_output_adjusted + local_attention_adjusted); 
                 if(threadIdx.x < num_rows_per_block){
                     rowmax_statistics[batch_idx][i * num_rows_per_block + threadIdx.x % num_rows_per_block] = global_rowmax_new[threadIdx.x];
