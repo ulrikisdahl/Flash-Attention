@@ -4,6 +4,7 @@ from torch.autograd import Function
 from flash_attention_extension import flash_attention_forward #, flash_attention_backward
 
 device = "cuda"
+dtype = torch.float32
 
 class FlashAttention(Function):
     @staticmethod
@@ -54,8 +55,7 @@ class TorchAttention(nn.Module):
         value: value tensor of shape (batch, seq, d_model)
         """
         sqrt_term = torch.sqrt(torch.tensor(query.shape[-1], dtype=torch.float32, device=query.device))
-        similarity_scores = torch.einsum("bqd, bkd -> bqk", query, key) / sqrt_term
-        # similarity_scores = torch.matmul(query, key.transpose(-2, -1)) / sqrt_term 
+        similarity_scores = torch.matmul(query, key.transpose(-2, -1)) / sqrt_term 
         attention_scores = nn.functional.softmax(similarity_scores, dim=-1)
         attention_output = torch.einsum("bqk, bkv -> bqv", attention_scores, value)
 
