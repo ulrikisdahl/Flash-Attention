@@ -1,7 +1,7 @@
 import torch
 import torch.nn as nn
 from torch.autograd import Function
-from flash_attention_extension import flash_attention_forward #, flash_attention_backward
+from flash_attention_extension import flash_attention_forward, flash_attention_backward
 
 device = "cuda"
 dtype = torch.float32
@@ -12,25 +12,22 @@ class FlashAttention(Function):
         """
         """
         output, rowmax_statistics, rowsum_statistics = flash_attention_forward(query, key, value)
-        ctx.save_for_backward(rowmax_statistics, rowsum_statistics)
+        ctx.save_for_backward(query, key, value, output, rowmax_statistics, rowsum_statistics)
         return output
     
     @staticmethod
-    def backward(ctx, output_grad, rowmax_, rowsum_):
+    def backward(ctx, output_grad):
         """
         """
-        # rowmax_statistics, rowsum_statistics = ctx.saved_tensors
-        # query_grad, key_grad, val_grad = flash_attention_backward(output_grad, rowmax_statistics, rowsum_statistics)
-        # return query_grad, key_grad, val_grad
-        return output_grad
+        query, key, value, output, rowmax_statistics, rowsum_statistics = ctx.saved_tensors
+        query_grad, key_grad, val_grad = flash_attention_backward(query, key, value, output, output_grad, rowmax_statistics, rowsum_statistics)
+        return query_grad, key_grad, val_grad
 
 
 class FlashAttentionModule(nn.Module):
     def __init__(self, seq, d_model):
         super(FlashAttentionModule, self).__init__()
-
-        #He initialization
-        self.query = nn.Linear
+        #No attention weights here since we dont test that part of the operation (in test.main)
 
     def forward(self, x):
         Q = torch.matmul(x, self.W_q)
@@ -43,9 +40,6 @@ class FlashAttentionModule(nn.Module):
 class TorchAttention(nn.Module):
     def __init__(self):
         super(TorchAttention, self).__init__()
-        # self.query = nn.Linear(in_features=d_model, out_features=d_model); 
-        # self.key = nn.Linear(in_features=d_model, out_features=d_model);
-        # self.value = nn.Linear(in_features=d_model, out_features=d_model)
         
     def forward(self, query, key, value):
         """
